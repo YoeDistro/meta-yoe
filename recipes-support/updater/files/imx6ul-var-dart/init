@@ -10,49 +10,12 @@
 #mtd5       data  0x3f00000  0x4100000         65         520
 #total size = 0x8000000, 128MiB
 
-UPDATER_VERSION="15"
-
-source platform
-
-speak() {
-  if [ "$UPDATER_SPEECH" = "1" ]; then
-    espeak $1
-  fi
-}
-
+# Prints information
 msg() {
   echo "$@" >/dev/console
 }
 
-# Prints information
-msg_splash() {
-  msg $1
-
-  if [ "$splash_enabled" = 1 ]; then
-    progress=$2
-
-    if [ "$progress" = "" ]; then
-      progress="0"
-    fi
-
-    TMPDIR=$SPLASH_DIR psplash-write "MSG $1"
-    TMPDIR=$SPLASH_DIR psplash-write "PROGRESS $progress"
-    usleep 500000
-  fi
-}
-
-SPLASH_DIR="/mnt/.splash"
-
-start_splash() {
-  if [ -e /usr/bin/psplash ]; then 
-    splash_enabled=1
-    # set up psplash
-    mkdir -p "$SPLASH_DIR"
-    mount tmpfs -t tmpfs $SPLASH_DIR -o,size=40k 2>&1 > /dev/console
-    TMPDIR=$SPLASH_DIR psplash& 2>&1 > /dev/console
-    sleep 1
-  fi
-}
+UPDATER_VERSION="62"
 
 BOOT="mtd1"
 KERNEL="mtd3"
@@ -63,12 +26,33 @@ ROOTFS_MOUNT="/root"
 MTD_ROOTFS=4
 MTD_DATA=5
 
+init_gpio() {
+  # turn on Audio amp
+  echo 18 >/sys/class/gpio/export
+  echo out >/sys/class/gpio/gpio18/direction
+  echo 1 >/sys/class/gpio/gpio18/value
+}
+
+# populate bootparam environment
+populate_bootparams() {
+  for p in $(cat /proc/cmdline); do
+    opt=$(echo $p | cut -d'=' -f1)
+    opt=$(echo $opt | tr '.-' '__')
+    if [ "$(echo $p | cut -d'=' -f1)" = "$p" ]; then
+      eval "bootparam_${opt}=true"
+    else
+      value="$(echo $p | cut -d'=' -f2-)"
+      eval "bootparam_${opt}=\"${value}\""
+    fi
+  done
+}
+
 format_data_partition() {
-  msg_splash "Formatting data partition"
+  msg "format_data"
   ubidetach -m $MTD_DATA 2>/dev/null
   flash_eraseall /dev/mtd$MTD_DATA
   if ! ubiattach -m $MTD_DATA; then
-    msg_splash "Error attaching to MTD data"
+    msg "Error attaching to MTD data"
     return 1
   fi
 
@@ -84,8 +68,8 @@ mount_data() {
     msg "data partition mount failed, formatting"
     format_data_partition
     if ! mount -t ubifs ubi1:ubidata $DATA_MOUNT_POINT; then
-      msg_splash "data partition mount after format failed"
-      speak "updater, data partition error, please service unit"
+      msg "data partition mount after format failed, bailing"
+      espeak "updater, data partition error, please service unit"
       return 1
     fi
   fi
@@ -104,7 +88,7 @@ update_uboot() {
     nanddump -l $SIZE -f uboot.dump /dev/$BOOT || return 1
     dd if=uboot.dump of=uboot.dump2 bs=$SIZE count=1
     if ! diff u-boot.img uboot.dump2 2>/dev/null; then
-      msg_splash "updating uboot"
+      msg "updating uboot"
       flash_eraseall /dev/$BOOT
       nandwrite -p /dev/$BOOT u-boot.img
       boot_updated=1
@@ -156,27 +140,29 @@ update_kernel() {
   fi
 
   if [ "$kernel_needs_update" = "1" ]; then
-    msg_splash "updating kernel image"
+    msg "updating kernel image"
     msg "DTB: $DTB_FILE"
     flash_eraseall /dev/$KERNEL || return 1
     msg "writing zImage"
     nandwrite -p /dev/$KERNEL zImage || return 1
     msg "writing dtb"
     nandwrite -p -s 0xbe0000 /dev/$KERNEL $DTB_FILE || return 1
-    msg_splash "kernel update complete"
+    msg "kernel update complete"
     boot_updated=1
   fi
+
+  msg "Returning from update_kernel, boot_update=$boot_updated"
 
   return 0
 }
 
 update_rootfs() {
   if [ -e rootfs.ubi ]; then
-    msg_splash "Writing new image, please wait ..."
+    msg "Writing new rootfs image, please wait ..."
     ubidetach -m $MTD_ROOTFS 2>/dev/null
     flash_eraseall /dev/$ROOTFS || return 1
     ubiformat /dev/$ROOTFS -f rootfs.ubi -s 2048 -O 2048
-    msg_splash "Image update complete"
+    msg "Rootfs update complete"
   fi
   return 0
 }
@@ -184,23 +170,23 @@ update_rootfs() {
 process_update() {
   UPDATE_FILE=$1
   if ! tar -C /tmp -xf $UPDATE_FILE; then
-    msg_splash "Failed to extract update image"
+    msg "Failed to extract update image"
     return 1
   fi
 
   cd /tmp
   if ! md5sum -c update.md5; then
-    msg_splash "Error: checksum error in update file"
+    msg "Error: checksum error in update file"
     return 1
   else
-    speak "updating system"
+    espeak "updating system"
     boot_updated=0
     update_uboot || return 1
     update_kernel || return 1
 
     if [ "$boot_updated" = "1" ]; then
-      msg_splash "Boot components updated, rebooting ..."
-      speak "rebooting"
+      msg "Boot components updated, rebooting ..."
+      espeak "rebooting"
       reboot -f
     fi
 
@@ -213,7 +199,7 @@ process_update() {
   # not doing this for now
   # while [ -e /sys/class/scsi_disk/* ]; do sleep 1; done
 
-  speak "update complete"
+  espeak "update complete"
   return 0
 }
 
@@ -225,26 +211,16 @@ initialize() {
   mount -t sysfs sysfs /sys
   mount -t proc proc /proc
 
-  start_splash 
+  init_gpio
 
-  plat_init
-
-  ubidetach -m $MTD_ROOTFS
-  ubidetach -m $MTD_DATA
-
-  if ! ubiattach -m $MTD_ROOTFS; then
-    flash_eraseall /dev/mtd$MTD_ROOTFS
-    ubiattach -m $MTD_ROOTFS
-  fi
-
-  if ! ubiattach -m $MTD_DATA; then
-    flash_eraseall /dev/mtd$MTD_DATA
-    ubiattach -m $MTD_DATA
-  fi
+  # attach MTD partitions first so they are always in the right order
+  ubiattach -m $MTD_ROOTFS
+  ubiattach -m $MTD_DATA
 
   msg "Sleeping for 3 second(s) for USB flash to settle..."
+  sleep 3
 
-  speak "updater version $UPDATER_VERSION"
+  espeak "point watch dart, updater version $UPDATER_VERSION"
 
   mkdir -p /usb
   mkdir -p /data
@@ -311,16 +287,16 @@ find_update_file() {
 }
 
 update_from_usb() {
-  speak "updater, found u s b disk"
+  espeak "updater, found u s b disk"
   update_file=$(find_update_file /usb)
   if echo $update_file | grep update; then
-    msg_splash "USB update: $update_file"
+    msg "Found update image file on USB disk: $update_file"
     if ! process_update /usb/$update_file; then
-      msg_splash "Failed to process update from USB"
-      speak "updater, failed to process update from u s b"
+      msg "Failed to process update from USB"
+      espeak "updater, failed to process update from u s b"
       return 1
     else
-      msg_splash "Update from USB complete"
+      msg "Update from USB complete"
       return 0
     fi
   fi
@@ -331,14 +307,14 @@ update_from_usb() {
 update_from_sd() {
   update_file=$(find_update_file /boot)
   if echo $update_file | grep update; then
-    msg_splash "SD update: $update_file"
+    msg "Found update image file on SD disk: $update_file"
     if ! process_update /boot/$update_file; then
-      msg_splash "Failed to process update from SD"
-      speak "updater, failed to process update from s d"
+      msg "Failed to process update from SD"
+      espeak "updater, failed to process update from s d"
       return 1
     else
-      msg_splash "Update complete, please remove card and cycle power"
-      speak "update from s d complete, please remove s d card and cycle power"
+      msg "Update from SD complete"
+      espeak "update from s d complete, please remove s d card and cycle power"
       sleep 9999d
     fi
   fi
@@ -348,15 +324,15 @@ update_from_sd() {
 update_from_data() {
   update_file=$(find_update_file /data/update)
   if echo $update_file | grep update; then
-    msg_splash "Data partition update: $update_file"
+    msg "Found update on data partition: $update_file"
     if ! process_update /data/update/$update_file; then
-      msg_splash "Failed to process update from nand"
-      speak "updater, failed to process update from nand"
+      msg "Failed to process update from nand"
+      espeak "updater, failed to process update from nand"
     else
-      msg_splash "Update from nand complete"
+      msg "Update from nand complete"
     fi
 
-    msg_splash "Removing update files from data partition"
+    msg "Removing update files from data partition"
     rm /data/update/*
   fi
 }
@@ -366,8 +342,8 @@ update_from_data() {
 
 mount_rootfs_sd() {
   if ! mount /dev/mmcblk0p2 $ROOTFS_MOUNT; then
-    msg_splash "Error mount SD rootfs, please fix ..."
-    speak "updater, S D file system error"
+    msg "Error mount SD rootfs, please fix ..."
+    espeak "updater, S D file system error"
     sleep 9999d
   fi
 
@@ -381,8 +357,8 @@ mount_rootfs_nand() {
   ubiattach -m $MTD_ROOTFS
 
   if ! mount -tubifs ubi0:rootfs $ROOTFS_MOUNT; then
-    msg_splash "Error mounting nand rootfs, please fix ..."
-    speak "updater, root f s file system error, please service unit"
+    msg "Error mounting nand rootfs, please fix ..."
+    espeak "updater, root f s file system error, please service unit"
     sleep 9999d
   fi
 }
@@ -391,12 +367,12 @@ boot() {
   mkdir -p $ROOTFS_MOUNT
 
   if [ -e /dev/mmcblk0p1 ]; then
-    msg_splash "Booting from SD ..."
-    speak "booting system from S D"
+    msg "Booting from SD ..."
+    espeak "booting system from S D"
     mount_rootfs_sd
   else
-    msg_splash "Booting from NAND ..."
-    speak "booting system"
+    msg "Booting from NAND ..."
+    espeak "booting system"
     mount_rootfs_nand
   fi
 
@@ -409,7 +385,7 @@ boot() {
   mount --move /proc $ROOTFS_MOUNT/proc
   mount --move /sys $ROOTFS_MOUNT/sys
 
-  msg_splash "switching to main filesystem"
+  msg "switching root filesystem"
 
   exec switch_root -c /dev/console $ROOTFS_MOUNT /sbin/init 5
 }
