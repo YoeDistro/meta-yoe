@@ -38,7 +38,7 @@ QTWEBKIT ??= "\
 
 inherit features_check
 
-REQUIRED_DISTRO_FEATURES = "opengl"
+REQUIRED_DISTRO_FEATURES += "opengl"
 
 X11BASE = "${@bb.utils.contains('DISTRO_FEATURES', 'x11', 'x11-base', '', d)}"
 IMAGE_FEATURES += "${@bb.utils.contains('DISTRO_FEATURES', 'wayland x11', '', '${X11BASE}', d)}"
